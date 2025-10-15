@@ -222,4 +222,59 @@ Route::prefix('user/{steam_id_64}')->group(function () {
         }
     });
 
+    Route::get('/games', function ($steam_id_64) {
+        $api_key = env('STEAM_SECRET');
+        $client = new Client();
+        $url = 'http://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/';
+
+        try {
+            $response = $client->get($url, [
+                'query' => [
+                    'key' => $api_key,
+                    'steamid' => $steam_id_64,
+                    'format' => 'json',
+                    'include_appinfo' => true,      // Pour obtenir le nom du jeu et les icônes
+                    'include_played_free_games' => true, // Inclure les jeux gratuits joués
+                ]
+            ]);
+
+            $data = json_decode((string)$response->getBody(), true);
+            
+            $games = $data['response']['games'] ?? [];
+            $total_games = $data['response']['game_count'] ?? 0;
+
+            // Formater la liste pour être plus propre pour le front-end
+             $formatted_games = collect($games)->map(function($game) {
+                // Créer et stocker les minutes brutes DANS le tableau
+                $playtime_minutes = $game['playtime_forever'] ?? 0;
+                $playtime_hours = round($playtime_minutes / 60, 1);
+                
+                // Rendre les URLs d'icônes robustes
+                $img_icon_url = $game['img_icon_url'] ?? null;
+                $img_logo_url = $game['img_logo_url'] ?? null;
+
+                return [
+                    'app_id' => $game['appid'],
+                    'name' => $game['name'],
+                    'playtime_minutes' => $playtime_minutes, // <-- LA CLÉ EST MAINTENANT DANS LE TABLEAU
+                    'playtime_hours' => $playtime_hours,
+                    'icon_url' => $img_icon_url ? "http://media.steampowered.com/steamcommunity/public/images/apps/{$game['appid']}/{$img_icon_url}.jpg" : null,
+                    'logo_url' => $img_logo_url ? "http://media.steampowered.com/steamcommunity/public/images/apps/{$game['appid']}/{$img_logo_url}.jpg" : null,
+                ];
+            })
+            // CORRECTION CRITIQUE : Trier par la clé du tableau ('playtime_minutes')
+            ->sortByDesc('playtime_minutes') 
+            ->values(); // Réindexer les clés numériques
+
+            return response()->json([
+                'status' => 'success',
+                'game_count' => $total_games,
+                'games' => $formatted_games,
+            ]);
+
+        } catch (\Exception $e) {
+            dd('Erreur API lors de la récupération de la bibliothèque de jeux.', $e->getMessage());
+        }
+    });
+
 });
