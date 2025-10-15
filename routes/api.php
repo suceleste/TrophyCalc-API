@@ -27,7 +27,7 @@ Route::get('/auth/steam/redirect', function () {
         'openid.ns'          => 'http://specs.openid.net/auth/2.0',
         'openid.mode'        => 'checkid_setup',
         'openid.return_to'   => env('STEAM_REDIRECT'),
-        'openid.realm'       => env('APP_URL'),
+        'openid.realm'       => 'http://127.0.0.1:5173',
         'openid.identity'    => 'http://specs.openid.net/auth/2.0/identifier_select',
         'openid.claimed_id'  => 'http://specs.openid.net/auth/2.0/identifier_select',
     ];
