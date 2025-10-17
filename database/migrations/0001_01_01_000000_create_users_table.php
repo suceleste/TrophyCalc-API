@@ -1,4 +1,4 @@
-<?php
+    <?php
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
@@ -17,6 +17,10 @@ return new class extends Migration
             $table->string('email')->unique();
             $table->timestamp('email_verified_at')->nullable();
             $table->string('password');
+            $table->string('steam_id_64')->unique()->nullable();
+            $table->string('avatar', 512)->nullable();
+            $table->string('profile_url', 512)->nullable();
+            $table->timestamp('profile_updated_at')->nullable();
             $table->rememberToken();
             $table->timestamps();
         });
