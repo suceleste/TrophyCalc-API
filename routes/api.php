@@ -28,7 +28,7 @@ Route::middleware('api')->group(function () {
 
     // --- GROUPE D'AUTHENTIFICATION STEAM ---
     Route::prefix('auth/steam')->group(function () {
-        
+
         // 1.1 Redirige l'utilisateur vers Steam pour se connecter
         Route::get('/redirect', function () {
             $params = [
@@ -72,7 +72,7 @@ Route::middleware('api')->group(function () {
                     $profile_response = Http::get('https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/', [
                         'key' => $api_key, 'steamids' => $steam_id_64
                     ]);
-                    
+
                     if ($profile_response->failed() || empty($profile_response->json('response.players'))) {
                         return Redirect::to('http://localhost:5173/login-failed?error=profile_not_found');
                     }
@@ -110,7 +110,7 @@ Route::middleware('api')->group(function () {
     // --- ROUTES PROTÉGÉES (NÉCESSITENT UN TOKEN) ---
     // Ce groupe est sécurisé. Seul un utilisateur connecté peut accéder à ces routes.
     Route::middleware('auth:sanctum')->prefix('user')->group(function () {
-        
+
         // Renvoie les infos de l'utilisateur actuellement connecté
         Route::get('/', function (Request $request) {
             return $request->user();
@@ -138,7 +138,7 @@ Route::middleware('api')->group(function () {
             }
 
             $games = $response->json('response.games', []);
-            
+
             $formattedGames = collect($games)->map(function ($game) {
                 return [
                     'app_id' => $game['appid'],
@@ -157,9 +157,83 @@ Route::middleware('api')->group(function () {
         // Renvoie les succès pour un jeu spécifique de l'utilisateur connecté
         Route::get('/games/{app_id}/achievements', function (Request $request, $app_id) {
             $user = $request->user();
-            // ... (Ici viendra la logique pour récupérer les succès)
-        });
-        
-    });
+            $apiKey = env('STEAM_SECRET');
 
+            if (!$user->steam_id_64) {
+                return response()->json(['message' => 'Aucun Steam ID associé.'], 404);
+            }
+
+            try {
+                // --- APPEL 1 : Statut du joueur (GetPlayerAchievements) ---
+                $playerAchievementsResponse = Http::get('https://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v0001/', [
+                    'appid' => $app_id,
+                    'key' => $apiKey,
+                    'steamid' => $user->steam_id_64,
+                    'l' => 'french'
+                ]);
+
+                if ($playerAchievementsResponse->failed()) {
+                    return response()->json(['message' => 'Impossible de contacter l\'API Steam (PlayerAchievements).'], 502);
+                }
+                $playerData = $playerAchievementsResponse->json();
+
+                if (!isset($playerData['playerstats']['success']) || $playerData['playerstats']['success'] !== true) {
+                    return response()->json([
+                        'status' => 'info',
+                        'message' => $playerData['playerstats']['message'] ?? 'Succès non disponibles (PlayerAchievements).'
+                    ], 404);
+                }
+                // On stocke les succès du joueur dans un format facile à chercher (clé = apiname)
+                $playerAchievements = collect($playerData['playerstats']['achievements'] ?? [])
+                                        ->keyBy('apiname'); // Très important pour la fusion
+
+                // --- APPEL 2 : Schéma global du jeu (GetSchemaForGame) ---
+                $schemaResponse = Http::get('https://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/', [
+                    'appid' => $app_id,
+                    'key' => $apiKey,
+                    'l' => 'french'
+                ]);
+
+                if ($schemaResponse->failed()) {
+                    return response()->json(['message' => 'Impossible de contacter l\'API Steam (SchemaForGame).'], 502);
+                }
+                // On récupère les détails de tous les succès du jeu
+                $schemaAchievements = collect($schemaResponse->json('game.availableGameStats.achievements', []));
+
+                // --- FUSION DES DONNÉES ---
+                $mergedAchievements = $schemaAchievements->map(function ($schemaAch) use ($playerAchievements) {
+                    // On cherche le statut du joueur pour ce succès
+                    $playerAch = $playerAchievements->get($schemaAch['name']); // 'name' dans le schéma correspond à 'apiname' chez le joueur
+
+                    return [
+                        'api_name' => $schemaAch['name'],
+                        'name' => $schemaAch['displayName'],
+                        'description' => $schemaAch['description'] ?? 'Pas de description disponible.',
+                        'icon' => $schemaAch['icon'],
+                        'icon_gray' => $schemaAch['icongray'],
+                        'hidden' => (bool)$schemaAch['hidden'],
+                        'achieved' => $playerAch ? (bool)$playerAch['achieved'] : false,
+                        'unlock_time' => $playerAch && $playerAch['achieved'] ? $playerAch['unlocktime'] : null,
+                    ];
+                })->sortByDesc('achieved')->values(); // Trié
+
+                $totalCount = $mergedAchievements->count();
+                $unlockedCount = $mergedAchievements->where('achieved', true)->count();
+
+                // --- RÉPONSE FINALE ---
+                return response()->json([
+                    'status' => 'success',
+                    'game_name' => $playerData['playerstats']['gameName'] ?? $schemaResponse->json('game.gameName') ?? "Jeu ID: {$app_id}",
+                    'achievements' => $mergedAchievements,
+                    'total_count' => $totalCount,
+                    'unlocked_count' => $unlockedCount,
+                ]);
+
+            } catch (\Exception $e) {
+                //Log::error("Erreur API Succès Steam DÉTAILS pour {$app_id} / {$user->steam_id_64}: " . $e->getMessage());
+                return response()->json(['status' => 'error', 'message' => 'Erreur interne lors de la récupération des détails des succès.'], 500);
+            }
+        });
+    });
 });
+
