@@ -5,6 +5,8 @@ use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Redirect;
 use Illuminate\Support\Facades\Http; // On utilise le client HTTP intégré à Laravel, c'est plus propre.
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use App\Models\User;
 use GuzzleHttp\Client;
@@ -234,6 +236,108 @@ Route::middleware('api')->group(function () {
                 return response()->json(['status' => 'error', 'message' => 'Erreur interne lors de la récupération des détails des succès.'], 500);
             }
         });
+
+        Route::get('/stats/global-completion', function (Request $request) {
+            $user = $request->user();
+            $apiKey = env('STEAM_SECRET');
+            $steamId = $user->steam_id_64;
+
+            if (!$steamId) {
+                return response()->json(['message' => 'Aucun Steam ID associé.'], 404);
+            }
+
+            // --- ENVELOPPE DU CACHE ---
+            $cacheKey = "global_completion_{$steamId}";
+            $cacheDuration = 60 * 60 * 24; // 24 heures
+
+            // On utilise Cache::remember autour de TOUTE la logique de calcul
+            $stats = Cache::remember($cacheKey, $cacheDuration, function () use ($apiKey, $steamId) {
+
+                // ==========================================================
+                // TON CODE FONCTIONNEL VA EXACTEMENT ICI, À L'INTÉRIEUR
+                // ==========================================================
+                Log::info("CACHE MISS: Calcul complétion globale pour {$steamId}");
+
+                // 1. Récupérer tous les jeux
+                $gamesResponse = Http::get('https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/', [
+                    'key' => $apiKey,
+                    'steamid' => $steamId,
+                    'format' => 'json',
+                    'include_appinfo' => false // Pas besoin ici
+                ]);
+                if ($gamesResponse->failed()) {
+                    Log::error("Échec GetOwnedGames pour {$steamId} lors du calcul cache.");
+                    return null; // Important: retourne null si le calcul initial échoue
+                }
+                $ownedGames = $gamesResponse->json('response.games', []);
+                Log::info("Nombre de jeux trouvés (cache calc) : " . count($ownedGames));
+
+                $totalAchievementsPossible = 0;
+                $totalAchievementsUnlocked = 0;
+                $gameCounter = 0;
+
+                // 2. Boucler sur chaque jeu
+                foreach ($ownedGames as $game) {
+                    $appId = $game['appid'];
+                    $gameCounter++;
+                    //Log::info("Traitement jeu {$gameCounter}/" . count($ownedGames) . " - AppID: {$appId}"); // Optionnel
+
+                    try {
+                        $achievementsResponse = Http::timeout(15)->get('https://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v0001/', [
+                            'appid' => $appId,
+                            'key' => $apiKey,
+                            'steamid' => $steamId,
+                        ]);
+                        if ($achievementsResponse->successful()) {
+                            $data = $achievementsResponse->json();
+                            if (isset($data['playerstats']['success']) && $data['playerstats']['success'] === true && isset($data['playerstats']['achievements'])) {
+                                $achievements = $data['playerstats']['achievements'];
+                                $totalAchievementsPossible += count($achievements);
+                                foreach ($achievements as $ach) {
+                                    if ($ach['achieved'] == 1) {
+                                        $totalAchievementsUnlocked++;
+                                    }
+                                }
+                            }
+                        }
+                        usleep(150000);
+                    } catch (\Exception $e) {
+                        Log::warning("Erreur API Succès pendant calcul global (cache calc) pour {$appId}/{$steamId}: " . $e->getMessage());
+                        usleep(150000);
+                    }
+                } // Fin foreach
+
+                Log::info("Fin calcul (cache calc). Possible: {$totalAchievementsPossible}, Débloqués: {$totalAchievementsUnlocked}");
+
+                // 3. Calcul
+                $globalCompletionRate = ($totalAchievementsPossible > 0)
+                                        ? round(($totalAchievementsUnlocked / $totalAchievementsPossible) * 100, 2)
+                                        : 0;
+                Log::info("Calcul terminé (cache calc). Pourcentage: {$globalCompletionRate}%");
+
+                // 4. Renvoyer le tableau de données à mettre en cache
+                return [
+                    'total_possible' => $totalAchievementsPossible,
+                    'total_unlocked' => $totalAchievementsUnlocked,
+                    'completion_percentage' => $globalCompletionRate,
+                    'calculated_at' => now()->toIso8601String() // Heure du calcul
+                ];
+                // ==========================================================
+                // FIN DE TON CODE FONCTIONNEL
+                // ==========================================================
+
+            }); // Fin de Cache::remember
+
+            // Gestion si le calcul a retourné null
+            if ($stats === null) {
+                return response()->json(['message' => 'Erreur lors du calcul initial des statistiques.'], 500);
+            }
+
+            // Renvoyer les stats (cache ou calcul)
+            return response()->json($stats);
+        });
     });
+
+
 });
 
