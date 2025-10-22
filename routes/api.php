@@ -178,6 +178,22 @@ Route::middleware('api')->group(function () {
 
     }); // Fin /search/games
 
+    Route::get('/search/users', function (Request $request) {
+        $query = $request->query('q');
+        if (!$query || strlen($query) < 3) {
+            return response()->json(['message' => 'Terme de recherche trop court (min 3 caractères).'], 400);
+        }
+
+        // Recherche dans la BDD locale (insensible à la casse par défaut avec SQLite/MySQL Collation)
+        $users = User::where('name', 'LIKE', "%{$query}%")
+                     ->select('id', 'name', 'avatar', 'steam_id_64') // Colonnes publiques
+                     ->whereNotNull('steam_id_64') // Uniquement profils Steam liés
+                     ->take(10) // Limite
+                     ->get();
+
+        return response()->json($users);
+    }); // Fin /search/users
+
     Route::middleware('auth:sanctum')->prefix('user')->group(function () {
         // Renvoie les succès pour un jeu spécifique de l'utilisateur connecté
         Route::get('/games/{app_id}/achievements', function (Request $request, $app_id) {
