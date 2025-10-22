@@ -216,6 +216,7 @@ Route::middleware('api')->group(function () {
                         'hidden' => (bool)$schemaAch['hidden'],
                         'achieved' => $playerAch ? (bool)$playerAch['achieved'] : false,
                         'unlock_time' => $playerAch && $playerAch['achieved'] ? $playerAch['unlocktime'] : null,
+                        'percent' => $schemaAch['percent'] ?? null,
                     ];
                 })->sortByDesc('achieved')->values(); // Trié
 
