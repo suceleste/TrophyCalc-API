@@ -108,54 +108,77 @@ Route::middleware('api')->group(function () {
         })->name('auth.steam.callback');
     });
 
+    Route::get('/search/games', function (Request $request) {
+        $query = $request->query('q');
+        if (!$query || strlen($query) < 3) {
+            return response()->json(['message' => 'Terme de recherche trop court (min 3 caractères).'], 400);
+        }
 
-    // --- ROUTES PROTÉGÉES (NÉCESSITENT UN TOKEN) ---
-    // Ce groupe est sécurisé. Seul un utilisateur connecté peut accéder à ces routes.
+        // 1. Récupérer la liste COMPLÈTE des jeux Steam (avec cache)
+        $appListCacheKey = 'steam_app_list';
+        $appListCacheDuration = 60 * 60 * 24; // Cache de 24h
+        $allApps = Cache::remember($appListCacheKey, $appListCacheDuration, function () { /* ... (logique GetAppList identique) ... */ });
+        if ($allApps === null) {
+            return response()->json(['message' => 'Impossible de récupérer la liste des jeux depuis Steam.'], 503);
+        }
+
+        // 2. Premier Filtrage par nom (insensible à la casse)
+        $searchQueryLower = strtolower($query);
+        $initialResults = collect($allApps)
+            ->filter(fn($app) => isset($app['name']) && str_contains(strtolower($app['name']), $searchQueryLower))
+            ->take(50); // Prend un peu plus au début pour avoir de la marge après le 2e filtre
+
+        // 3. NOUVEAU : Vérifier le type de chaque résultat via l'API appdetails
+        $filteredGames = collect([]); // Collection pour stocker les vrais jeux
+        $appDetailCacheDuration = 60 * 60 * 24 * 7; // Cache 1 semaine pour les détails d'un jeu
+
+        foreach ($initialResults as $app) {
+            $appId = $app['appid'];
+            $detailsCacheKey = "appdetails_{$appId}";
+
+            // On met en cache la réponse de appdetails
+            $details = Cache::remember($detailsCacheKey, $appDetailCacheDuration, function () use ($appId) {
+                Log::info("CACHE MISS (AppDetails): Récupération détails pour {$appId}");
+                try {
+                    // Appel à l'API appdetails (store API, pas Web API)
+                    $response = Http::timeout(5)->get("https://store.steampowered.com/api/appdetails", [
+                        'appids' => $appId,
+                        'l' => 'french' // Demander en français si possible
+                    ]);
+                    if ($response->successful() && isset($response->json()[$appId]['success']) && $response->json()[$appId]['success'] === true) {
+                        return $response->json()[$appId]['data']; // Retourne seulement la section 'data'
+                    }
+                    Log::warning("Échec ou réponse invalide appdetails pour {$appId}");
+                    return null; // Retourne null si échec
+                } catch (\Exception $e) {
+                     Log::error("Erreur critique appdetails pour {$appId}: " . $e->getMessage());
+                     return null;
+                }
+            });
+
+            // Si on a récupéré les détails ET que le type est 'game'
+            if ($details && isset($details['type']) && $details['type'] === 'game') {
+                $filteredGames->push([
+                    'appid' => $appId,
+                    'name' => $details['name'] ?? $app['name'], // Prend le nom des détails si dispo
+                    'header_image' => $details['header_image'] ?? "https://cdn.akamai.steamstatic.com/steam/apps/{$appId}/header.jpg" // Prend l'URL directe si dispo
+                ]);
+            }
+
+            // Limiter le nombre final de résultats et ajouter une pause
+            if ($filteredGames->count() >= 20) {
+                 break; // Arrête la boucle si on a assez de résultats
+            }
+            usleep(50000); // Petite pause entre les appels appdetails
+
+        } // Fin foreach
+
+        // 4. Renvoyer les résultats filtrés
+        return response()->json($filteredGames->values()); // Renvoie les vrais jeux trouvés
+
+    }); // Fin /search/games
+
     Route::middleware('auth:sanctum')->prefix('user')->group(function () {
-
-        // Renvoie les infos de l'utilisateur actuellement connecté
-        Route::get('/', function (Request $request) {
-            return $request->user();
-        });
-
-        // Renvoie la liste des jeux de l'utilisateur connecté
-        Route::get('/games', function (Request $request) {
-            $user = $request->user();
-            $apiKey = env('STEAM_SECRET');
-
-            if (!$user->steam_id_64) {
-                return response()->json(['message' => 'Aucun Steam ID associé à cet utilisateur.'], 404);
-            }
-
-            $response = Http::get('https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/', [
-                'key' => $apiKey,
-                'steamid' => $user->steam_id_64,
-                'format' => 'json',
-                'include_appinfo' => true,
-                'include_played_free_games' => true,
-            ]);
-
-            if ($response->failed()) {
-                return response()->json(['message' => 'Impossible de contacter l\'API de Steam.'], 502);
-            }
-
-            $games = $response->json('response.games', []);
-
-            $formattedGames = collect($games)->map(function ($game) {
-                return [
-                    'app_id' => $game['appid'],
-                    'name' => $game['name'],
-                    'playtime_hours' => round($game['playtime_forever'] / 60, 1),
-                    'icon_url' => $game['img_icon_url'] ? "https://media.steampowered.com/steamcommunity/public/images/apps/{$game['appid']}/{$game['img_icon_url']}.jpg" : null,
-                ];
-            })->sortByDesc('playtime_hours')->values();
-
-            return response()->json([
-                'game_count' => $response->json('response.game_count', 0),
-                'games' => $formattedGames
-            ]);
-        });
-
         // Renvoie les succès pour un jeu spécifique de l'utilisateur connecté
         Route::get('/games/{app_id}/achievements', function (Request $request, $app_id) {
             $user = $request->user();
