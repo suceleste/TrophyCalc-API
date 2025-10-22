@@ -237,6 +237,141 @@ Route::middleware('api')->group(function () {
             }
         });
 
+        Route::get('/achievements/latest', function (Request $request) {
+            $user = $request->user();
+            $apiKey = env('STEAM_SECRET');
+            $steamId = $user->steam_id_64;
+
+            if (!$steamId) {
+                return response()->json(['message' => 'Aucun Steam ID associé.'], 404);
+            }
+
+            $cacheKey = "latest_achievements_details_{$steamId}";
+            $cacheDuration = 60 * 60; // 1 heure
+
+            $latestAchievementsWithDetails = Cache::remember($cacheKey, $cacheDuration, function () use ($apiKey, $steamId) {
+
+                Log::info("CACHE MISS: Récupération détails derniers succès pour {$steamId}");
+
+                // 1. Récupérer tous les jeux possédés
+                $gamesResponse = Http::get('https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/', [
+                    'key' => $apiKey,
+                    'steamid' => $steamId,
+                    'format' => 'json',
+                    'include_appinfo' => true // Besoin du nom du jeu
+                ]);
+                if ($gamesResponse->failed()) {
+                    Log::error("Échec GetOwnedGames pour {$steamId} (derniers succès)");
+                    return []; // Retourne tableau vide en cas d'erreur API
+                }
+                $ownedGames = $gamesResponse->json('response.games', []);
+                Log::info("Nombre de jeux trouvés (derniers succès) : " . count($ownedGames));
+
+                $allUnlockedAchievements = [];
+
+                // 2. Boucler pour récupérer les succès débloqués
+                foreach ($ownedGames as $game) {
+                    $appId = $game['appid'];
+                    $gameName = $game['name'];
+                    try {
+                        $achievementsResponse = Http::timeout(10)->get('https://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v0001/', [
+                            'appid' => $appId,
+                            'key' => $apiKey,
+                            'steamid' => $steamId,
+                        ]);
+                        if ($achievementsResponse->successful()) {
+                            $data = $achievementsResponse->json();
+                            if (isset($data['playerstats']['success']) && $data['playerstats']['success'] === true && isset($data['playerstats']['achievements'])) {
+                                foreach ($data['playerstats']['achievements'] as $ach) {
+                                    if ($ach['achieved'] == 1 && isset($ach['unlocktime']) && $ach['unlocktime'] > 0) {
+                                        $allUnlockedAchievements[] = [
+                                            'app_id'      => $appId,
+                                            'game_name'   => $gameName,
+                                            'api_name'    => $ach['apiname'],
+                                            'unlock_time' => $ach['unlocktime'],
+                                        ];
+                                    }
+                                }
+                            }
+                        }
+                        usleep(100000); // Pause
+                    } catch (\Exception $e) {
+                        Log::warning("Erreur API Succès (derniers succès) pour {$appId}/{$steamId}: " . $e->getMessage());
+                        usleep(100000);
+                    }
+                } // Fin foreach jeux
+
+                // 3. Trier et garder les 5 plus récents
+                usort($allUnlockedAchievements, fn($a, $b) => $b['unlock_time'] <=> $a['unlock_time']);
+                $latestAchievements = array_slice($allUnlockedAchievements, 0, 5);
+                Log::info("Nombre de succès récents trouvés avant détails : " . count($latestAchievements));
+
+                // 4. Récupérer les détails pour ces 5 succès
+                $achievementDetails = [];
+                $appIdsToFetch = collect($latestAchievements)->pluck('app_id')->unique()->values()->all(); // Assure que c'est un tableau simple
+                Log::info("AppIDs pour lesquels récupérer les schémas : ", $appIdsToFetch);
+
+                foreach ($appIdsToFetch as $appIdToFetch) {
+                    try {
+                        // Mettre en cache la réponse du schéma
+                        $schema = Cache::remember("game_schema_{$appIdToFetch}", 60*60*12, function () use ($apiKey, $appIdToFetch) {
+                            Log::info("CACHE MISS (Schema): Récupération schéma pour {$appIdToFetch}");
+                            $schemaResponse = Http::timeout(10)->get('https://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/', [
+                                'appid' => $appIdToFetch, 'key' => $apiKey, 'l' => 'french'
+                            ]);
+                            if ($schemaResponse->failed()) {
+                                Log::error("Échec GetSchemaForGame pour {$appIdToFetch}");
+                                return null;
+                            }
+                            return $schemaResponse->json('game.availableGameStats.achievements', []);
+                        });
+
+                        if ($schema !== null) { // Vérifie si le schéma a été récupéré
+                            // Stocker les détails indexés par api_name
+                            $achievementDetails[$appIdToFetch] = collect($schema)->keyBy('name');
+                            Log::info("Schéma chargé pour {$appIdToFetch}. Nombre de succès dans schéma: " . count($achievementDetails[$appIdToFetch]));
+                        } else {
+                            Log::warning("Schéma non récupéré ou vide pour {$appIdToFetch}.");
+                            $achievementDetails[$appIdToFetch] = collect([]); // Met une collection vide pour éviter les erreurs
+                        }
+                        usleep(50000); // Petite pause
+
+                    } catch (\Exception $e) {
+                        Log::warning("Erreur API Schema (derniers succès) pour {$appIdToFetch}: " . $e->getMessage());
+                        usleep(50000);
+                        $achievementDetails[$appIdToFetch] = collect([]); // Met une collection vide en cas d'erreur
+                    }
+                } // Fin foreach appIdsToFetch
+
+                // 5. Fusionner les détails dans les 5 derniers succès
+                $results = collect($latestAchievements)->map(function ($ach) use ($achievementDetails) {
+                    // S'assurer que la clé existe avant d'essayer d'y accéder
+                    $detailsCollection = $achievementDetails[$ach['app_id']] ?? collect([]);
+                    $details = $detailsCollection->get($ach['api_name']); // Utilise get() qui retourne null si non trouvé
+
+                    return [
+                        'app_id'      => $ach['app_id'],
+                        'game_name'   => $ach['game_name'],
+                        'api_name'    => $ach['api_name'],
+                        'unlock_time' => $ach['unlock_time'],
+                        // Ajout des détails avec vérification
+                        'name'        => $details['displayName'] ?? $ach['api_name'], // Vrai nom ou fallback
+                        'description' => $details['description'] ?? null,
+                        'icon'        => $details['icon'] ?? null,
+                        'icon_gray'   => $details['icongray'] ?? null,
+                        'hidden'      => isset($details['hidden']) ? (bool)$details['hidden'] : false,
+                    ];
+                })->all(); // Convertit la collection en tableau simple
+
+                Log::info("Fin fusion détails. Nombre de résultats finaux: " . count($results));
+                return $results; // Retourne le tableau final à mettre en cache
+
+            }); // Fin de Cache::remember
+
+            // Renvoyer les succès (depuis cache ou calcul)
+            return response()->json($latestAchievementsWithDetails);
+        });
+
         Route::get('/stats/global-completion', function (Request $request) {
             $user = $request->user();
             $apiKey = env('STEAM_SECRET');
