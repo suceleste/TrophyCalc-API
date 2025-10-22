@@ -372,6 +372,92 @@ Route::middleware('api')->group(function () {
             return response()->json($latestAchievementsWithDetails);
         });
 
+        Route::get('/games/nearly-completed', function (Request $request) {
+            $user = $request->user();
+            $apiKey = env('STEAM_SECRET');
+            $steamId = $user->steam_id_64;
+
+            if (!$steamId) { /* ... */ }
+
+            $cacheKey = "nearly_completed_games_{$steamId}";
+            // Cache un peu plus court, peut-être 6 heures ?
+            $cacheDuration = 60 * 60 * 6;
+
+            $nearlyCompletedGames = Cache::remember($cacheKey, $cacheDuration, function () use ($apiKey, $steamId) {
+
+                Log::info("CACHE MISS: Calcul jeux presque terminés pour {$steamId}");
+
+                // 1. Récupérer tous les jeux (avec nom/info)
+                $gamesResponse = Http::get('https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/', [
+                    'key' => $apiKey, 'steamid' => $steamId, 'format' => 'json', 'include_appinfo' => true
+                ]);
+                if ($gamesResponse->failed()) { return []; }
+                $ownedGames = $gamesResponse->json('response.games', []);
+
+                $nearlyCompletedList = [];
+                $gameCounter = 0;
+
+                // 2. Boucler sur chaque jeu pour calculer son %
+                foreach ($ownedGames as $game) {
+                    $appId = $game['appid'];
+                    $gameName = $game['name'];
+                    $gameCounter++;
+                    // Log::info("Calcul % jeu {$gameCounter}/" . count($ownedGames) . " - AppID: {$appId}"); // Optionnel
+
+                    try {
+                        $achievementsResponse = Http::timeout(10)->get('https://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v0001/', [
+                            'appid' => $appId, 'key' => $apiKey, 'steamid' => $steamId,
+                        ]);
+
+                        if ($achievementsResponse->successful()) {
+                            $data = $achievementsResponse->json();
+                            if (isset($data['playerstats']['success']) && $data['playerstats']['success'] === true && isset($data['playerstats']['achievements'])) {
+
+                                $achievements = $data['playerstats']['achievements'];
+                                $total = count($achievements);
+                                $unlocked = 0;
+
+                                if ($total > 0) { // On ne compte que les jeux ayant des succès
+                                    foreach ($achievements as $ach) {
+                                        if ($ach['achieved'] == 1) {
+                                            $unlocked++;
+                                        }
+                                    }
+                                    $percentage = round(($unlocked / $total) * 100);
+
+                                    // Le filtre ! Entre 80% et 99% (inclus)
+                                    if ($percentage >= 80 && $percentage < 100) {
+                                        $nearlyCompletedList[] = [
+                                            'app_id' => $appId,
+                                            'name' => $gameName,
+                                            'percentage' => $percentage,
+                                            'unlocked' => $unlocked,
+                                            'total' => $total,
+                                            'icon_url' => $game['img_icon_url'] ? "https://media.steampowered.com/steamcommunity/public/images/apps/{$appId}/{$game['img_icon_url']}.jpg" : null,
+                                        ];
+                                    }
+                                }
+                            }
+                        }
+                        usleep(100000); // Pause
+
+                    } catch (\Exception $e) {
+                        Log::warning("Erreur API Succès (nearly completed) pour {$appId}/{$steamId}: " . $e->getMessage());
+                        usleep(100000);
+                    }
+                } // Fin foreach
+
+                // 3. Trier par pourcentage décroissant et prendre les 5 premiers
+                usort($nearlyCompletedList, fn($a, $b) => $b['percentage'] <=> $a['percentage']);
+
+                Log::info("Fin calcul jeux presque terminés pour {$steamId}. Trouvés : " . count($nearlyCompletedList));
+                return array_slice($nearlyCompletedList, 0, 5); // Garde les 5 premiers max
+
+            }); // Fin Cache::remember
+
+            return response()->json($nearlyCompletedGames);
+        });
+
         Route::get('/stats/global-completion', function (Request $request) {
             $user = $request->user();
             $apiKey = env('STEAM_SECRET');
