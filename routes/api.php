@@ -194,6 +194,19 @@ Route::middleware('api')->group(function () {
         return response()->json($users);
     }); // Fin /search/users
 
+    Route::get('/profiles/steam/{steam_id_64}', function (string $steam_id_64) {
+
+        // 1. Chercher l'utilisateur dans notre BDD par son SteamID
+        //    firstOrFail() renvoie une erreur 404 automatiquement si non trouvé.
+        $user = User::where('steam_id_64', $steam_id_64)
+                    ->select('id', 'name', 'avatar', 'steam_id_64', 'created_at') // Sélectionne les infos publiques
+                    ->firstOrFail();
+
+        // 2. Renvoyer les informations
+        return response()->json($user);
+
+    })->name('profiles.steam'); // On nomme la route pour une utilisation future
+
     Route::middleware('auth:sanctum')->prefix('user')->group(function () {
         // Renvoie les succès pour un jeu spécifique de l'utilisateur connecté
         Route::get('/games/{app_id}/achievements', function (Request $request, $app_id) {
