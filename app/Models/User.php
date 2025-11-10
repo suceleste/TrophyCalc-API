@@ -6,7 +6,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
-use Laravel\Sanctum\HasApiTokens;  
+use Laravel\Sanctum\HasApiTokens;
 
 class User extends Authenticatable
 {
@@ -21,10 +21,12 @@ class User extends Authenticatable
         'password',
 
         'steam_id_64',
-        'name',          
-        'avatar',               
-        'profile_url', 
-        'profile_updated_at',          
+        'name',
+        'avatar',
+        'profile_url',
+        'profile_updated_at',
+        'total_xp',
+        'games_completed'
     ];
 
     /**
@@ -39,7 +41,7 @@ class User extends Authenticatable
      * The attributes that should be cast.
      */
     protected $casts = [
-        'profile_updated_at' => 'datetime', 
+        'profile_updated_at' => 'datetime',
         'email_verified_at' => 'datetime',
         'password' => 'hashed',
     ];
