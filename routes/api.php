@@ -9,11 +9,14 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
 use App\Models\User;
+use App\Models\GlobalAchievement;
+use App\Models\UserGameScore;
 use GuzzleHttp\Client; // Requis pour la validation Steam non-standard
 use App\Jobs\CalculateUserGlobalStats; // Importe le Job
 use App\Jobs\CalculateLatestAchievements; // Importe le Job
 use App\Jobs\CalculateNearlyCompletedGames; // Importe le Job
-
+use App\Jobs\UpdateRarityForGame;
+use App\Jobs\CalculateUserTotalXp;
 /*
 |--------------------------------------------------------------------------
 | API Routes
@@ -217,6 +220,11 @@ Route::middleware('api')->group(function () {
         })->name('auth.steam.callback');
     }); // Fin groupe /auth/steam
 
+    Route::get('/leaderboard', function () {
+        $leaderboard = User::where('total_xp', '>', 0)->orderBy('total_xp', 'DESC')->select('name', 'avatar', 'total_xp', 'games_completed', 'steam_id_64')->take(100)->get();
+
+        return response()->json($leaderboard);
+    });
 
     /**
      * ROUTES PROTÉGÉES (NÉCESSITENT UN TOKEN SANCTUM VALIDE)
@@ -242,14 +250,17 @@ Route::middleware('api')->group(function () {
 
             $cacheKey = "global_completion_{$steamId}";
             $statsInCache = Cache::get($cacheKey); // Récupère le cache
+            $xpCacheKey = "user_xp_stats_{$steamId}";
+            $xpInCache = Cache::get($xpCacheKey);
 
             // Lance le Job en arrière-plan pour rafraîchir
             CalculateUserGlobalStats::dispatch($user);
+            CalculateUserTotalXp::dispatch($user);
 
             if (config('app.debug')) Log::info("Job CalculateUserGlobalStats DÉPÊCHÉ pour {$steamId}");
 
             // Renvoie les stats en cache (même si elles sont anciennes) ou null
-            return response()->json($statsInCache);
+            return response()->json(array_merge($statsInCache ?? [], $xpInCache ?? []));
         });
 
         /**
@@ -315,8 +326,17 @@ Route::middleware('api')->group(function () {
          * Renvoie les succès d'un jeu spécifique (avec détails et cache de 6h).
          */
         Route::get('/games/{app_id}/achievements', function (Request $request, $app_id) {
-            $user = $request->user(); $apiKey = env('STEAM_SECRET'); $steamId = $user->steam_id_64;
+
+            $user = $request->user();
+            $apiKey = env('STEAM_SECRET');
+            $steamId = $user->steam_id_64;
             if (!$steamId) { return response()->json(['message' => 'Aucun Steam ID.'], 404); }
+
+            $rarityCacheKey = "rarity_updated_{$app_id}";
+            if (!Cache::has($rarityCacheKey)){
+                UpdateRarityForGame::dispatch($app_id);
+                Cache::put($rarityCacheKey, true, now()->addDay());
+            }
 
             $cacheKey = "game_achievements_{$steamId}_{$app_id}";
             $cacheDuration = 60 * 60 * 6; // 6 heures
