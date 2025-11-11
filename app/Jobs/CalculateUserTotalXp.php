@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Log;
 use App\Models\User;
 use App\Models\GlobalAchievement;
 use App\Models\UserGameScore;
+use Illuminate\Support\Facades\DB;
 
 class CalculateUserTotalXp implements ShouldQueue
 {
@@ -95,19 +96,23 @@ class CalculateUserTotalXp implements ShouldQueue
 
                 $totalXp += $gameXp;
 
-                $scoreToSave = UserGameScore::firstOrNew([
-                    'user_id' => $this->user->id,
-                    'app_id'  => $appId
-                ]);
+                DB::table('user_game_scores')->updateOrInsert(
+                    // 1er paramètre : La "Clé de Recherche" (ton tableau composite)
+                    [
+                        'user_id' => $this->user->id,
+                        'app_id'  => $appId
+                    ],
 
-                // 2. Remplis (ou mets à jour) les données
-                $scoreToSave->xp_score = $gameXp;
-                $scoreToSave->is_completed = $isCompleted;
-                $scoreToSave->unlocked_count = $newUnlockedCount;
-                $scoreToSave->total_count = $newTotalCount;
-
-                // 3. Sauvegarde (fait l'INSERT ou l'UPDATE)
-                $scoreToSave->save();
+                    // 2ème paramètre : Les "Nouvelles Données" à écrire
+                    [
+                        'xp_score'       => $gameXp,
+                        'is_completed'   => $isCompleted,
+                        'unlocked_count' => $newUnlockedCount,
+                        'total_count'    => $newTotalCount,
+                        'updated_at'     => now(), // On doit le mettre manuellement
+                        'created_at'     => now()  // On le met aussi (pour la première fois)
+                    ]
+                );
             }
 
             if ($index > 0 && $index % 20 === 0)

@@ -182,7 +182,7 @@ Route::middleware('api')->group(function () {
                     $profile_response = Http::get('https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/', ['key' => $api_key, 'steamids' => $steam_id_64]);
                     if ($profile_response->failed() || empty($profile_response->json('response.players'))) {
                         Log::error("Échec récupération profil Steam pour {$steam_id_64} après validation.");
-                        return Redirect::to(env('FRONTEND_URL', 'http://localhost:5173') . '/login-failed?error=profile_not_found');
+                        return Redirect::to(env('FRONTEND_URL') . '/login-failed?error=profile_not_found');
                     }
                     $player = $profile_response->json('response.players')[0];
 
