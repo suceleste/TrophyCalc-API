@@ -39,7 +39,7 @@ class CalculateUserTotalXp implements ShouldQueue
         Log::info("[JOB START] Calculate Xp to {$steamId}");
 
         $ownedGamesresponse = Http::get('https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/', [
-            'key' => $apiKey, 'steamid' => $steamId
+            'key' => $apiKey, 'steamid' => $steamId, 'include_played_free_games' => 1
         ]);
         if ($ownedGamesresponse->failed()){ Log::error("[JOB ERROR] Failed OwnedGames Response API : Game {$steamId}"); return;}
         $ownedGames = $ownedGamesresponse->json('response.games');
