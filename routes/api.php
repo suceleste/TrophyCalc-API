@@ -43,68 +43,38 @@ Route::middleware('api')->group(function () {
          * Recherche globale de jeux Steam (basée sur GetAppList + appdetails).
          * Met en cache les résultats pour la performance.
          */
+        // C'est toi qui codes.
+
         Route::get('/games', function (Request $request) {
             $query = $request->query('q');
-            if (!$query || strlen($query) < 3) {
-                return response()->json(['message' => 'Terme de recherche trop court (min 3 caractères).'], 400);
-            }
+            if (!$query || strlen($query) < 3) { /* ... return 400 ... */ }
 
-            // 1. Récupérer la liste complète des jeux (cache 24h)
-            $appListCacheKey = 'steam_app_list';
-            $appListCacheDuration = 60 * 60 * 24; // 24h
-            $allApps = Cache::remember($appListCacheKey, $appListCacheDuration, function () {
-                 if (config('app.debug')) Log::info("CACHE MISS: Récupération liste complète apps Steam.");
-                 try {
-                     $response = Http::timeout(30)->get('https://api.steampowered.com/ISteamApps/GetAppList/v2/');
-                     if ($response->failed()) { Log::error("Échec GetAppList Steam."); return null; }
-                     return $response->json('applist.apps', []);
-                 } catch (\Exception $e) { Log::error("Erreur critique GetAppList: " . $e->getMessage()); return null;}
-            });
-            if ($allApps === null) {
-                return response()->json(['message' => 'Impossible de récupérer la liste des jeux depuis Steam.'], 503); // Service Unavailable
-            }
+            // 1. Appelle la "nouvelle" API (l'autocomplétion du magasin)
+            $response = Http::get('https://store.steampowered.com/api/storesearch', [
+                'term' => $query,
+                'l' => 'french',
+                'cc' => 'FR',
+                'v' => '1'
+            ]);
 
-            // 2. Filtrer par nom
-            $searchQueryLower = strtolower($query);
-            $initialResults = collect($allApps)
-                ->filter(fn($app) => isset($app['name']) && $app['name'] !== '' && str_contains(strtolower($app['name']), $searchQueryLower))
-                ->take(50); // Prend 50 résultats pour avoir de la marge après filtrage par type
+            if ($response->failed()) { /* ... return 503 ... */ }
 
-            $filteredGames = collect([]);
-            $appDetailCacheDuration = 60 * 60 * 24 * 7; // 1 semaine
+            // 2. Filtre les résultats
+            $items = $response->json('items', []);
+            $games = collect($items)
+                        // Garde que les 'app' (jeux), pas les 'sub' (packs)
+                        ->where('type', 'app')
+                        ->map(function ($game) {
+                            return [
+                                'appid' => $game['id'],
+                                'name' => $game['name'],
+                                'header_image' => $game['tiny_image']
+                            ];
+                        })
+                        ->take(10); // Prend les 10 premiers
 
-            // 3. Vérifier le type (game) pour chaque résultat
-            foreach ($initialResults as $app) {
-                $appId = $app['appid'];
-                $detailsCacheKey = "appdetails_{$appId}";
-
-                // Met en cache les détails de chaque jeu
-                $details = Cache::remember($detailsCacheKey, $appDetailCacheDuration, function () use ($appId) {
-                     // if (config('app.debug')) Log::info("CACHE MISS (AppDetails): Détails pour {$appId}"); // Optionnel
-                     try {
-                         $response = Http::timeout(5)->get("https://store.steampowered.com/api/appdetails", ['appids' => $appId, 'l' => 'french']);
-                         if ($response->successful() && isset($response->json()[$appId]['success']) && $response->json()[$appId]['success'] === true) {
-                             return $response->json()[$appId]['data'];
-                         }
-                         return null;
-                     } catch (\Exception $e) { return null; }
-                });
-
-                // Ajoute à la liste finale si c'est bien un jeu
-                if ($details && isset($details['type']) && $details['type'] === 'game') {
-                    $filteredGames->push([
-                        'appid' => $appId,
-                        'name' => $details['name'] ?? $app['name'],
-                        'header_image' => $details['header_image'] ?? "https://cdn.akamai.steamstatic.com/steam/apps/{$appId}/header.jpg"
-                    ]);
-                }
-                // Limite les résultats finaux à 20
-                if ($filteredGames->count() >= 20) { break; }
-                usleep(50000); // Pause légère pour ne pas surcharger l'API appdetails
-            }
-            return response()->json($filteredGames->values());
-        }); // Fin /search/games
-
+            return response()->json($games);
+        });
         /**
          * Recherche globale d'utilisateurs inscrits sur TrophyCalc (basée sur notre BDD).
          */
