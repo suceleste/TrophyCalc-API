@@ -43,7 +43,7 @@ class CalculateUserGlobalStats implements ShouldQueue
 
         // --- 1. Récupérer les jeux ---
         $gamesResponse = Http::get('https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/', [
-            'key' => $apiKey, 'steamid' => $steamId, 'format' => 'json'
+            'key' => $apiKey, 'steamid' => $steamId, 'include_played_free_games' => 1, 'format' => 'json'
         ]);
         if ($gamesResponse->failed()) {
              Log::error("JOB ÉCHEC: Échec GetOwnedGames pour {$steamId}.");
