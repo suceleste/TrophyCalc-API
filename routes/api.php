@@ -37,13 +37,35 @@ Route::middleware('api')->group(function () {
     /**
      * Groupe de routes publiques pour la recherche.
      */
-    Route::prefix('search')->group(function () {
 
-        /**
-         * Recherche globale de jeux Steam (basée sur GetAppList + appdetails).
-         * Met en cache les résultats pour la performance.
-         */
-        // C'est toi qui codes.
+    Route::prefix('/games/{app_id}/achievements', function (string $app_id) {
+        $apiKey = env('STEAM_SECRET');
+        $schemaResponse = Http::get('https://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/', [
+          'appid' => $app_id, 'key' => $apiKey, 'l' => 'french'
+        ]);
+        $schemaAchievements = collect($schemaResponse->json('game.availableGameStats.achievements', []));
+        $RarityData = GlobalAchievement::where('app_id', $app_id)->pluck('xp_value', 'api_name');
+
+        $mergedAchievements = $schemaAchievements->map(function ($schemaAch) use ($RarityData) {
+            $apiName = $schemaAch['name'];
+            $xpValue = $RarityData->get($apiName) ?? 10;
+
+            return [
+                'api_name'    => $apiName,
+                'name'        => $schemaAch['displayName'],
+                'description' => $schemaAch['description'] ?? '...',
+                'icon'        => $schemaAch['icon'],
+                'icon_gray'   => $schemaAch['icongray'],
+                'xp_value'    => $xpValue,
+                'achieved'    => false,
+                'unlock_time' => null
+            ];
+        });
+
+        return response()->json($mergedAchievements);
+    });
+
+    Route::prefix('search')->group(function () {
 
         Route::get('/games', function (Request $request) {
             $query = $request->query('q');
