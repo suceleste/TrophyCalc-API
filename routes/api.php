@@ -117,9 +117,9 @@ Route::middleware('api')->group(function () {
     /**
      * Route publique pour récupérer les données de profil d'un utilisateur de TrophyCalc.
      */
-     Route::get('/profiles/steam/{steam_id_64}', function (string $steam_id_64) {
+    Route::get('/profiles/steam/{steam_id_64}', function (string $steam_id_64) {
         $user = User::where('steam_id_64', $steam_id_64)
-                    ->select('id', 'name', 'avatar', 'steam_id_64', 'created_at')
+                    ->select('id', 'name', 'avatar', 'profile_url', 'total_xp', 'games_completed', 'steam_id_64', 'created_at')
                     ->firstOrFail(); // Renvoie 404 si non trouvé
         return response()->json($user);
     })->name('profiles.steam');
