@@ -126,6 +126,11 @@ return [
         'emergency' => [
             'path' => storage_path('logs/laravel.log'),
         ],
+        'steam' =>[
+            'driver' => 'daily',
+            'path' => storage_path('logs/steam.log'),
+            'day' => 14,
+        ],
 
     ],
 

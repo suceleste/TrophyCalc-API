@@ -4,24 +4,40 @@ namespace App\Jobs;
 
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
-use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use App\Models\User;
 use App\Models\GlobalAchievement;
 use App\Models\UserGameScore;
-use Illuminate\Support\Facades\DB;
+use App\Services\SteamService;
+use App\Jobs\SyncGameAchievements;
 
+/**
+ * Class CalculateUserTotalXp
+ *
+ * Job "Dispatcher" (Chef de Chantier).
+ *
+ * Ce Job est responsable de l'orchestration de la mise à jour globale.
+ * Il ne réalise aucun calcul lourd. Son rôle est de récupérer la liste
+ * complète des jeux d'un utilisateur et de déléguer le traitement
+ * à des workers unitaires (SyncGameAchievements).
+ *
+ * @package App\Jobs
+ */
 class CalculateUserTotalXp implements ShouldQueue
 {
     use Queueable;
 
-    protected $user;
-
-    public $timeout = 7200;
+    /**
+     * L'instance de l'utilisateur à mettre à jour.
+     *
+     * @var User
+     */
+    protected User $user;
 
     /**
-     * Create a new job instance.
+     * Crée une nouvelle instance du Job.
+     *
+     * @param User $user L'utilisateur cible.
      */
     public function __construct(User $user)
     {
@@ -29,115 +45,33 @@ class CalculateUserTotalXp implements ShouldQueue
     }
 
     /**
-     * Execute the job.
+     * Exécute la logique du Dispatcher.
+     *
+     * Flux d'exécution :
+     * 1. Récupération de la liste des jeux possédés (OwnedGames).
+     * 2. Vérification de sécurité (Liste vide ?).
+     * 3. Boucle "Fan-Out" : Dispatch d'un Job SyncGameAchievements par jeu.
+     *
+     * @param SteamService $steamService Service injecté pour la communication API.
+     * @return void
      */
-    public function handle(): void
+    public function handle(SteamService $steamService): void
     {
-        $apiKey = env('STEAM_SECRET');
-        $steamId = $this->user->steam_id_64;
+        Log::channel('steam')->info("------ Démarage Du Job Dispatcher CUTXP -------");
+        $games = $steamService->getOwnedGames($this->user->steam_id_64);
 
-        Log::info("[JOB START] Calculate Xp to {$steamId}");
-
-        $ownedGamesresponse = Http::get('https://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/', [
-            'key' => $apiKey, 'steamid' => $steamId, 'include_played_free_games' => 1
-        ]);
-        if ($ownedGamesresponse->failed()){ Log::error("[JOB ERROR] Failed OwnedGames Response API : Game {$steamId}"); return;}
-        $ownedGames = $ownedGamesresponse->json('response.games');
-
-        $totalXp = 0;
-        $totalCompleted = 0;
-        foreach ($ownedGames as $index => $game)
-        {
-            $appId = $game['appid'];
-
-            $scoreMemory = UserGameScore::where('user_id', $this->user->id)->where('app_id', $appId)->first();
-            if( $scoreMemory && $scoreMemory->is_completed )
-            {
-                $totalXp += $scoreMemory->xp_score;
-                $totalCompleted ++;
-
-                Log::info("[JOB] Skip Game {$appId}");
-
-                continue;
-            }
-
-            $achievementsresponse = Http::timeout(15)->get('https://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v0001/', [
-                    'appid' => $appId, 'key' => $apiKey, 'steamid' => $steamId
-                ]);
-            if ($achievementsresponse->failed()){ Log::error("[JOB ERROR] Failed Achievement Response API : Game {$appId}"); continue;}
-            $achievements = $achievementsresponse->json('playerstats.achievements');
-            if (empty($achievements)) { Log::info("[JOB] Pas de succès trouvés pour {$appId}, on saute."); continue; }
-
-            $newTotalCount = count($achievements);
-            $newUnlockedCount = 0 ;
-            foreach($achievements as $trophy) { if($trophy['achieved']){ $newUnlockedCount += 1; } }
-            if($scoreMemory && $scoreMemory->unlocked_count == $newUnlockedCount && $scoreMemory->total_count == $newTotalCount)
-            {
-                $totalXp += $scoreMemory->xp_score;
-
-                Log::info("[JOB] No Changed Game {$appId}");
-
-                continue;
-            }
-
-            $unlockedApiNames = [];
-            foreach($achievements as $trophy) { if ($trophy['achieved']) { $unlockedApiNames[] = $trophy['apiname']; } }
-
-            Log::debug("[JOB DEBUG] Prêt pour le SUM()", [
-                'appId' => $appId,
-                'count_unlocked' => count($unlockedApiNames),
-                'names' => $unlockedApiNames // Affiche les noms des succès
-            ]);
-
-            $gameXp = GlobalAchievement::where('app_id', $appId)->whereIn('api_name', $unlockedApiNames)->sum('xp_value');
-            if ($gameXp > 0 ) {
-                $isCompleted = ($newUnlockedCount == $newTotalCount);
-                if($isCompleted) { $gameXp += 1000; $totalCompleted ++;}
-
-                $totalXp += $gameXp;
-
-                DB::table('user_game_scores')->updateOrInsert(
-                    // 1er paramètre : La "Clé de Recherche" (ton tableau composite)
-                    [
-                        'user_id' => $this->user->id,
-                        'app_id'  => $appId
-                    ],
-
-                    // 2ème paramètre : Les "Nouvelles Données" à écrire
-                    [
-                        'xp_score'       => $gameXp,
-                        'is_completed'   => $isCompleted,
-                        'unlocked_count' => $newUnlockedCount,
-                        'total_count'    => $newTotalCount,
-                        'updated_at'     => now(), // On doit le mettre manuellement
-                        'created_at'     => now()  // On le met aussi (pour la première fois)
-                    ]
-                );
-            }
-
-            if ($index > 0 && $index % 20 === 0)
-            {
-                $this->user->update(
-                [
-                    'total_xp' => $totalXp,
-                    'games_completed' => $totalCompleted,
-                ]);
-            }
-            usleep(300000);
+        if(empty($games)) {
+            Log::channel('steam')->warning("[Dispatcher CUTXP] Erreur Games Empty ( SteamId = {$this->user->steam_id_64} )");
+            return ;
         }
 
-        $this->user->update(
-                [
-                    'total_xp' => $totalXp,
-                    'games_completed' => $totalCompleted,
-                ]);
+        $count = count($games);
+        Log::channel('steam')->info("[DISPATCHER CUTXP] {$count} jeux trouvés. Distribution des tâches...");
 
-        $cacheKey = "user_xp_stats_{$this->user->steam_id_64}";
-        Cache::put($cacheKey, [
-            'total_xp' => $totalXp,
-            'games_completed' => $totalCompleted,
-            'calculated_at' => now()->toIso8601String()
-        ], now()->addHours(6)); // Cache de 6h
+        foreach ($games as $game) {
+            SyncGameAchievements::dispatch($this->user, $game['appid']);
+        }
 
+        Log::channel('steam')->info("------ END Job Dispatcher CUTXP ------");
     }
 }

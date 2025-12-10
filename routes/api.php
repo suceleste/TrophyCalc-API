@@ -1,17 +1,14 @@
 <?php
 
+use App\Http\Controllers\Api\SteamAuthController;
+
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
-use Illuminate\Support\Facades\Redirect;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Hash;
-use Illuminate\Support\Str;
 use App\Models\User;
 use App\Models\GlobalAchievement;
-use App\Models\UserGameScore;
-use GuzzleHttp\Client; // Requis pour la validation Steam non-standard
 use App\Jobs\CalculateUserGlobalStats; // Importe le Job
 use App\Jobs\CalculateLatestAchievements; // Importe le Job
 use App\Jobs\CalculateNearlyCompletedGames; // Importe le Job
@@ -33,6 +30,11 @@ Route::middleware('api')->group(function () {
      * Route publique simple pour vérifier que l'API est en ligne.
      */
     Route::get('/status', fn() => response()->json(['status' => 'API is running']));
+
+    Route::prefix('auth/steam')->controller(SteamAuthController::class)->group( function () {
+        Route::get('/redirect', 'redirect')->name('auth.steam.redirect');
+        Route::get('/callback', 'callback')->name('auth.steam.callback');
+    });
 
     /**
      * Groupe de routes publiques pour la recherche.
@@ -123,94 +125,6 @@ Route::middleware('api')->group(function () {
                     ->firstOrFail(); // Renvoie 404 si non trouvé
         return response()->json($user);
     })->name('profiles.steam');
-
-
-    /**
-     * Groupe de routes pour le processus d'authentification Steam.
-     */
-    Route::prefix('auth/steam')->group(function () {
-
-        /**
-         * 1.1 Redirige l'utilisateur vers la page de connexion Steam.
-         */
-        Route::get('/redirect', function () {
-            $params = [
-                'openid.ns'         => 'http://specs.openid.net/auth/2.0',
-                'openid.mode'       => 'checkid_setup',
-                'openid.return_to'  => route('auth.steam.callback'), // URL de retour (notre route ci-dessous)
-                'openid.realm'      => config('app.url'), // L'adresse de notre site
-                'openid.identity'   => 'http://specs.openid.net/auth/2.0/identifier_select',
-                'openid.claimed_id' => 'http://specs.openid.net/auth/2.0/identifier_select',
-            ];
-            $steam_login_url = 'https://steamcommunity.com/openid/login?' . http_build_query($params);
-            return Redirect::to($steam_login_url);
-        })->name('auth.steam.redirect');
-
-        /**
-         * 1.2 Gère le retour de Steam (Callback).
-         * Valide la connexion, crée/met à jour l'utilisateur, génère un token
-         * et redirige vers le callback du frontend.
-         */
-        Route::get('/callback', function (Request $request) {
-             try {
-                // Prépare les paramètres pour la validation (PHP change les '.' en '_')
-                $raw_params = $request->all();
-                $params_for_steam = [];
-                foreach ($raw_params as $key => $value) { $params_for_steam[str_replace('_', '.', $key)] = $value; }
-                $params_for_steam['openid.mode'] = 'check_authentication';
-
-                // Valide la réponse avec Guzzle (plus fiable pour ce vieux protocole)
-                $client = new Client();
-                $response = $client->post('https://steamcommunity.com/openid/login', ['form_params' => $params_for_steam]);
-                $response_body = (string)$response->getBody();
-
-                // Si la signature est valide
-                if (str_contains($response_body, 'is_valid:true')) {
-                    $claimed_id = $request->input('openid_claimed_id');
-                    $steam_id_64 = basename($claimed_id);
-                    $api_key = env('STEAM_SECRET');
-
-                    // Récupère le profil public Steam
-                    $profile_response = Http::get('https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/', ['key' => $api_key, 'steamids' => $steam_id_64]);
-                    if ($profile_response->failed() || empty($profile_response->json('response.players'))) {
-                        Log::error("Échec récupération profil Steam pour {$steam_id_64} après validation.");
-                        return Redirect::to(env('FRONTEND_URL') . '/login-failed?error=profile_not_found');
-                    }
-                    $player = $profile_response->json('response.players')[0];
-
-                    // Crée ou met à jour l'utilisateur dans notre BDD
-                    $user = User::updateOrCreate(
-                        ['steam_id_64' => $steam_id_64], // Clé unique pour trouver
-                        [ // Données à insérer/mettre à jour
-                            'name' => $player['personaname'],
-                            'email' => "{$steam_id_64}@steam.trophycalc", // Email unique
-                            'password' => Hash::make(Str::random(20)),
-                            'avatar' => $player['avatarfull'],
-                            'profile_url' => $player['profileurl'],
-                            'profile_updated_at' => now(),
-                        ]
-                    );
-
-                    // Génère un token d'API Sanctum pour le frontend
-                    $token = $user->createToken('auth_token')->plainTextToken;
-
-                    // Redirige vers le callback du frontend avec le token
-                    $frontend_callback_url = rtrim(env('FRONTEND_URL', 'http://localhost:5173'), '/') . '/auth/callback';
-                    $redirect_url = $frontend_callback_url . '?token=' . $token;
-                    return Redirect::to($redirect_url);
-
-                } else {
-                    // Si la validation Steam échoue
-                    Log::warning("Échec validation Steam", ['params' => $request->all(), 'steam_response' => $response_body]);
-                    return Redirect::to(env('FRONTEND_URL', 'http://localhost:5173') . '/login-failed?error=steam_validation_failed');
-                }
-            } catch (\Exception $e) {
-                // En cas d'erreur critique
-                Log::error("Erreur critique pendant callback Steam: " . $e->getMessage(), ['trace' => $e->getTraceAsString()]);
-                return Redirect::to(env('FRONTEND_URL', 'http://localhost:5173') . '/login-failed?error=critical_error');
-            }
-        })->name('auth.steam.callback');
-    }); // Fin groupe /auth/steam
 
     Route::get('/leaderboard', function () {
         $leaderboard = User::where('total_xp', '>', 0)->orderBy('total_xp', 'DESC')->select('name', 'avatar', 'total_xp', 'games_completed', 'steam_id_64')->take(100)->get();
