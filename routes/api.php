@@ -1,6 +1,7 @@
 <?php
 
-use App\Http\Controllers\Api\SteamAuthController;
+use App\Http\Controllers\Api\PublicController;
+use App\Http\Controllers\Api\SteamAuth\SteamAuthController;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
@@ -31,100 +32,30 @@ Route::middleware('api')->group(function () {
      */
     Route::get('/status', fn() => response()->json(['status' => 'API is running']));
 
+    /**
+     * Route publique de Connexion a Steam
+     */
     Route::prefix('auth/steam')->controller(SteamAuthController::class)->group( function () {
         Route::get('/redirect', 'redirect')->name('auth.steam.redirect');
         Route::get('/callback', 'callback')->name('auth.steam.callback');
     });
 
-    /**
-     * Groupe de routes publiques pour la recherche.
-     */
-
-    Route::prefix('/games/{app_id}/achievements', function (string $app_id) {
-        $apiKey = env('STEAM_SECRET');
-        $schemaResponse = Http::get('https://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/', [
-          'appid' => $app_id, 'key' => $apiKey, 'l' => 'french'
-        ]);
-        $schemaAchievements = collect($schemaResponse->json('game.availableGameStats.achievements', []));
-        $RarityData = GlobalAchievement::where('app_id', $app_id)->pluck('xp_value', 'api_name');
-
-        $mergedAchievements = $schemaAchievements->map(function ($schemaAch) use ($RarityData) {
-            $apiName = $schemaAch['name'];
-            $xpValue = $RarityData->get($apiName) ?? 10;
-
-            return [
-                'api_name'    => $apiName,
-                'name'        => $schemaAch['displayName'],
-                'description' => $schemaAch['description'] ?? '...',
-                'icon'        => $schemaAch['icon'],
-                'icon_gray'   => $schemaAch['icongray'],
-                'xp_value'    => $xpValue,
-                'achieved'    => false,
-                'unlock_time' => null
-            ];
+    Route::controller(PublicController::class)->group(function () {
+        /**
+         * Route de Recherche
+         */
+        Route::prefix('search')->group(function () {
+            Route::get('/games', 'searchGames')->name('search.games');
+            Route::get('/users', 'searchUsers')->name('search.users');
         });
 
-        return response()->json($mergedAchievements);
+        /**
+         * Route d'affichage de gameou profile.
+         */
+        Route::get('/games/{app_id}/achievements', 'showGameAchievements')->name("game.achievemets");
+        Route::get('/profile/{steam_id_64}', 'showProfile')->name('profile');
     });
 
-    Route::prefix('search')->group(function () {
-
-        Route::get('/games', function (Request $request) {
-            $query = $request->query('q');
-            if (!$query || strlen($query) < 3) { /* ... return 400 ... */ }
-
-            // 1. Appelle la "nouvelle" API (l'autocomplétion du magasin)
-            $response = Http::get('https://store.steampowered.com/api/storesearch', [
-                'term' => $query,
-                'l' => 'french',
-                'cc' => 'FR',
-                'v' => '1'
-            ]);
-
-            if ($response->failed()) { /* ... return 503 ... */ }
-
-            // 2. Filtre les résultats
-            $items = $response->json('items', []);
-            $games = collect($items)
-                        // Garde que les 'app' (jeux), pas les 'sub' (packs)
-                        ->where('type', 'app')
-                        ->map(function ($game) {
-                            return [
-                                'appid' => $game['id'],
-                                'name' => $game['name'],
-                                'header_image' => $game['tiny_image']
-                            ];
-                        })
-                        ->take(10); // Prend les 10 premiers
-
-            return response()->json($games);
-        });
-        /**
-         * Recherche globale d'utilisateurs inscrits sur TrophyCalc (basée sur notre BDD).
-         */
-        Route::get('/users', function (Request $request) {
-            $query = $request->query('q');
-            if (!$query || strlen($query) < 3) {
-                return response()->json(['message' => 'Terme de recherche trop court (min 3 caractères).'], 400);
-            }
-            $users = User::where('name', 'LIKE', "%{$query}%")
-                         ->select('id', 'name', 'avatar', 'steam_id_64') // Ne renvoie que les données publiques
-                         ->whereNotNull('steam_id_64') // Uniquement les profils liés à Steam
-                         ->take(10) // Limite à 10 résultats
-                         ->get();
-            return response()->json($users);
-        }); // Fin /search/users
-    }); // Fin groupe /search
-
-    /**
-     * Route publique pour récupérer les données de profil d'un utilisateur de TrophyCalc.
-     */
-    Route::get('/profiles/steam/{steam_id_64}', function (string $steam_id_64) {
-        $user = User::where('steam_id_64', $steam_id_64)
-                    ->select('id', 'name', 'avatar', 'profile_url', 'total_xp', 'games_completed', 'steam_id_64', 'created_at')
-                    ->firstOrFail(); // Renvoie 404 si non trouvé
-        return response()->json($user);
-    })->name('profiles.steam');
 
     Route::get('/leaderboard', function () {
         $leaderboard = User::where('total_xp', '>', 0)->orderBy('total_xp', 'DESC')->select('name', 'avatar', 'total_xp', 'games_completed', 'steam_id_64')->take(100)->get();
@@ -231,7 +162,7 @@ Route::middleware('api')->group(function () {
         /**
          * Renvoie les succès d'un jeu spécifique (avec détails et cache de 6h).
          */
-        Route::get('/games/{app_id}/achievements', function (Request $request, $app_id) {
+        Route::get('/games/{app_id}/progress', function (Request $request, $app_id) {
 
             $user = $request->user();
             $apiKey = env('STEAM_SECRET');

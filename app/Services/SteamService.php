@@ -88,7 +88,7 @@ class SteamService
         ]);
 
         if($response->failed()){
-            Log::error("[SteamService] Steam API Error (GetOwnedGames): " . $response->body());
+            Log::channel('steam')->error("[SteamService] Steam API Error (GetOwnedGames): " . $response->body());
             return [];
         }
 
@@ -121,4 +121,61 @@ class SteamService
         Log::channel('steam')->info("[SteamService] Réponse d'achivements Validé (appId = {$appId}, steamId =  {$steamId64})");
         return $response->json('playerstats.achievements');
     }
+
+    /**
+     * Récupère une liste de jeux pour un nom
+     *
+     * @param string $name Le nom du jeu recherché
+     * @return Illuminate\Http\JsonResponse La réponse json des résultat de la recherche
+     */
+    public function searchStoreGames(string $name)
+    {
+        $response = Http::get('https://store.steampowered.com/api/storesearch', [
+                'term' => $name,
+                'l' => 'french',
+                'cc' => 'FR',
+                'v' => '1'
+        ]);
+
+        if($response->failed()) {
+            Log::channel('steam')->error("[SteamService] Erreur lors de la Récupération des jeu : {$name}");
+            return ;
+        }
+
+        Log::channel('steam')->info("Recherche effectué : {$name}");
+        return $response->json("items", []);
+    }
+
+
+    /**
+     * Récupère la liste des succès d'un jeu spécifique
+     *
+     * @param int $appId L'id unique du jeu
+     * @return array{gameName: string|null, gameImage: string, achievements: array} Un tableau complet.
+     */
+    public function getGameAchievements(int $appId)
+    {
+        $response = Http::get('https://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/', [
+          'appid' => $appId,
+          'key' => env('STEAM_SECRET'),
+          'l' => 'french'
+        ]);
+
+        if($response->failed()){
+            Log::channel('steam')->error("[SteamService] Erreur lors de la récupération du detail du jeu : {$appId}");
+            return ;
+        }
+
+        $gameName = $response->json("game.gameName") ?? "Jeu Inconnu";
+        $achievements = $response->json("game.availableGameStats.achievements") ?? [];
+
+        Log::channel('steam')->info("Récupération détail du jeu : {$appId}");
+        return [
+            "gameName" => $gameName,
+            "gameImage" => "https://cdn.akamai.steamstatic.com/steam/apps/{$appId}/header.jpg",
+            "achievements" => $achievements
+        ];
+    }
+
+
 }
